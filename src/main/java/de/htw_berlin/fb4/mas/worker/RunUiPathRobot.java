@@ -15,6 +15,7 @@ import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +48,8 @@ import static java.util.concurrent.TimeUnit.MINUTES;
  *     <li>Diesen ExternalTaskHandler mit {@code new RunUiPathRobot(Path.of("c:\\Pfad\zum\\Prozess.nupkg"))} (siehe Punkt 6) erstellen und verwenden</li>
  * </ol>
  * <p>
+ * Der zweite Konstruktor-Parameter legt fest, dass nur die ausgewählten Camunda-Variablen übergeben werden.
+ * <p>
  * Siehe auch: <a href="https://docs.uipath.com/robot/standalone/2023.10/user-guide/command-line-interface">Robot Command Line Interface</a>
  */
 public class RunUiPathRobot implements ExternalTaskHandler {
@@ -61,13 +64,24 @@ public class RunUiPathRobot implements ExternalTaskHandler {
 
     private final String processName;
 
+    private final List<String> inputVariableNames;
+
     /**
      * Erstellt einen {@link ExternalTaskHandler}, der für jeden {@link ExternalTask} einen UiPath-Robot startet
      * und den angegebenen Prozess ausführt.
      */
     public RunUiPathRobot(String processName) {
+        this(processName, null);
+    }
+
+    /**
+     * Erstellt einen {@link ExternalTaskHandler}, der für jeden {@link ExternalTask} einen UiPath-Robot startet
+     * und den angegebenen Prozess ausführt.
+     */
+    public RunUiPathRobot(String processName, List<String> inputVariableNames) {
         this.projectPackage = null;
         this.processName = processName;
+        this.inputVariableNames = inputVariableNames;
     }
 
     /**
@@ -75,6 +89,14 @@ public class RunUiPathRobot implements ExternalTaskHandler {
      * und die angegebene nupkg-Datei ausführt.
      */
     public RunUiPathRobot(Path projectPackage) {
+        this(projectPackage, null);
+    }
+
+    /**
+     * Erstellt einen {@link ExternalTaskHandler}, der für jeden {@link ExternalTask} einen UiPath-Robot startet
+     * und die angegebene nupkg-Datei ausführt.
+     */
+    public RunUiPathRobot(Path projectPackage, List<String> inputVariableNames) {
         if (!Files.exists(projectPackage)) {
             throw new IllegalArgumentException(projectPackage + " does not exist");
         }
@@ -85,6 +107,7 @@ public class RunUiPathRobot implements ExternalTaskHandler {
 
         this.projectPackage = projectPackage;
         this.processName = null;
+        this.inputVariableNames = inputVariableNames;
     }
 
     @Override
@@ -141,9 +164,12 @@ public class RunUiPathRobot implements ExternalTaskHandler {
         return arguments;
     }
 
-    private static String convertVariablesAsRobotInputArgument(ExternalTask externalTask) {
+    private String convertVariablesAsRobotInputArgument(ExternalTask externalTask) {
+        Collection<String> variableNamesToConvert = inputVariableNames != null && !inputVariableNames.isEmpty() ? inputVariableNames : externalTask.getAllVariables().keySet();
+
         Map<String, Object> convertibleVariables = new HashMap<>();
-        externalTask.getAllVariables().forEach((name, value) -> {
+        variableNamesToConvert.forEach(name -> {
+            Object value = externalTask.getVariable(name);
             if (value instanceof String || value instanceof Number || value instanceof Boolean) {
                 convertibleVariables.put(name, value);
             }
