@@ -1,5 +1,6 @@
 package de.htw_berlin.fb4.mas.worker;
 
+import jakarta.activation.DataHandler;
 import jakarta.mail.Authenticator;
 import jakarta.mail.Message;
 import jakarta.mail.MessagingException;
@@ -7,17 +8,28 @@ import jakarta.mail.PasswordAuthentication;
 import jakarta.mail.Session;
 import jakarta.mail.Transport;
 import jakarta.mail.internet.InternetAddress;
+import jakarta.mail.internet.MimeBodyPart;
 import jakarta.mail.internet.MimeMessage;
+import jakarta.mail.internet.MimeMultipart;
+import jakarta.mail.util.ByteArrayDataSource;
 import org.camunda.bpm.client.task.ExternalTask;
 import org.camunda.bpm.client.task.ExternalTaskHandler;
 import org.camunda.bpm.client.task.ExternalTaskService;
+import org.camunda.bpm.engine.variable.Variables;
+import org.camunda.bpm.engine.variable.value.BytesValue;
+import org.camunda.bpm.engine.variable.value.FileValue;
+import org.camunda.bpm.engine.variable.value.StringValue;
+import org.camunda.bpm.engine.variable.value.TypedValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.Properties;
 
@@ -38,6 +50,14 @@ import static jakarta.mail.Message.RecipientType.TO;
  *     <li>cc = ${sales_mail_address}</li>
  *     <li>subject = Auftragsbestätigung</li>
  *     <li>body = Sehr geehrte Damen und Herren, hiermit bestätigen wir Ihnen Auftrag ${auftragsnummer}.</li>
+ *     <li>attachment (optional) = einer dieser Werte:
+ *          <ul>
+ *              <li>String mit Pfad zur Datei</li>
+ *              <li>Objekt vom Typ {@link FileValue}, siehe {@link Variables#fileValue(File)} oder {@link Variables#fileValue(String)}</li>
+ *              <li>Objekt vom Typ {@code byte[]}</li>
+ *          </ul>
+ *     </li>
+ *     <li>attachmentName (optional) = wenn attachment ein byte[] ist, dann der String mit dem Dateinamen</li>
  * </ul>
  * <p>
  * Die Konfiguration erfolgt über die Datei mail.properties, die sich im Ausführungsverzeichnis befinden muss.
@@ -78,18 +98,47 @@ public class SendMail implements ExternalTaskHandler {
         String cc = externalTask.getVariable("cc");
         String subject = externalTask.getVariable("subject");
         String body = externalTask.getVariable("body");
+        FileValue attachment = tryGetAttachment(externalTask);
 
         try {
             log.info("Sending mail with subject '{}' to '{}'{}", subject, to, cc != null ? " (cc: '" + cc + "')" : "");
-            sendMail(from, to, cc, subject, body);
+            sendMail(from, to, cc, subject, body, attachment);
 
             externalTaskService.complete(externalTask);
-        } catch (MessagingException e) {
+        } catch (MessagingException | IOException e) {
             handleFailure(externalTask, externalTaskService, e);
         }
     }
 
-    private void sendMail(String from, String to, String cc, String subject, String body) throws MessagingException {
+    private FileValue tryGetAttachment(ExternalTask externalTask) {
+        TypedValue attachment = externalTask.getVariableTyped("attachment");
+        if (attachment instanceof FileValue) {
+            return (FileValue) attachment;
+        }
+
+        if (attachment instanceof StringValue) {
+            Path attachmentPath = null;
+            try {
+                attachmentPath = Path.of(((StringValue) attachment).getValue());
+            } catch (InvalidPathException ignored) {
+            }
+
+            if (attachmentPath != null && Files.isRegularFile(attachmentPath)) {
+                return Variables.fileValue(attachmentPath.getFileName().toString()).file(attachmentPath.toFile()).create();
+            }
+        }
+
+        if (attachment instanceof BytesValue) {
+            String attachmentName = externalTask.getVariable("attachmentName");
+            if (attachmentName != null) {
+                return Variables.fileValue(attachmentName).file(((BytesValue) attachment).getValue()).create();
+            }
+        }
+
+        return null;
+    }
+
+    private void sendMail(String from, String to, String cc, String subject, String body, FileValue attachment) throws MessagingException, IOException {
         Session session = createSession();
 
         Message message = new MimeMessage(session);
@@ -99,7 +148,20 @@ public class SendMail implements ExternalTaskHandler {
             message.setRecipients(CC, InternetAddress.parse(cc));
         }
         message.setSubject(subject);
-        message.setText(body);
+
+        if (attachment != null) {
+            MimeBodyPart textPart = new MimeBodyPart();
+            textPart.setText(body);
+
+            MimeBodyPart attachmentPart = new MimeBodyPart();
+            attachmentPart.setDataHandler(new DataHandler(new ByteArrayDataSource(attachment.getValue().readAllBytes(), "application/octet-stream")));
+            attachmentPart.setFileName(attachment.getFilename());
+
+            MimeMultipart content = new MimeMultipart(textPart, attachmentPart);
+            message.setContent(content);
+        } else {
+            message.setText(body);
+        }
 
         Transport.send(message);
     }
